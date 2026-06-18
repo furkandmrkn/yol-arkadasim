@@ -110,7 +110,9 @@ export async function searchPlacesNearby(
     return legacyPlaces;
   }
 
-  return mockPlaces(query, lat, lng);
+  // API key varken mock'a düşme — sahte "X Müzesi" sonuçları kategori filtrelerini bozar.
+  console.warn(`Places API boş/hatalı döndü: "${query}" (${lat}, ${lng})`);
+  return [];
 }
 
 async function searchPlacesNewApi(
@@ -129,7 +131,7 @@ async function searchPlacesNewApi(
       },
     },
     languageCode: "tr",
-    maxResultCount: 10,
+    maxResultCount: 20,
   };
 
   const res = await fetch(url.toString(), {

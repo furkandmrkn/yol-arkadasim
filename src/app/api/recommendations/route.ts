@@ -8,6 +8,9 @@ import { getProgressAlongRoute } from "@/lib/route-utils";
 import { getLocationById } from "@/data/turkish-locations";
 import type { TripWizardData, WeatherSummary, PoiRecommendation } from "@/types/trip";
 
+// Vercel Pro: en fazla 60 sn. Hobby planda üst sınır ~10 sn kalır.
+export const maxDuration = 60;
+
 interface ResolvedCity {
   id: string;
   label: string;
@@ -45,6 +48,34 @@ function buildWizard(trip: NonNullable<Awaited<ReturnType<typeof prisma.trip.fin
   };
 }
 
+const CATEGORY_EXTRA_QUERIES: Record<string, string[]> = {
+  nature: ["tabiat parkı", "mesire alanı", "göl manzara"],
+  food: ["restoran", "yerel yemek"],
+  museum: ["müze", "arkeoloji müzesi"],
+  historic: ["tarihi yer", "kale antik"],
+  beach: ["plaj", "sahil"],
+  cave: ["mağara", "underground city"],
+  shopping: ["alışveriş merkezi", "çarşı"],
+  thermal: ["termal kaplıca"],
+};
+
+function buildGroupQueries(cityLabel: string, category: string, variant: number): string[] {
+  const term =
+    category === "general" ? "gezilecek yerler popüler" : getCategorySearchTerm(category) ?? category;
+  const queries = new Set<string>([`${cityLabel} ${term}`]);
+
+  for (const extra of CATEGORY_EXTRA_QUERIES[category] ?? []) {
+    queries.add(`${cityLabel} ${extra}`);
+  }
+
+  if (variant > 0) {
+    queries.add(`${cityLabel} ${term} popüler`);
+    queries.add(`${cityLabel} en iyi ${term}`);
+  }
+
+  return Array.from(queries).slice(0, 5);
+}
+
 async function fetchGroup(
   city: ResolvedCity,
   category: string,
@@ -52,17 +83,11 @@ async function fetchGroup(
   weather: WeatherSummary | undefined,
   excludePlaceIds: string[],
   limit: number,
-  variant: number
+  variant: number,
+  options?: { skipReasons?: boolean }
 ): Promise<PoiRecommendation[]> {
-  const term =
-    category === "general" ? "gezilecek yerler popüler" : getCategorySearchTerm(category) ?? category;
   const radius = 40000;
-
-  const queries = [`${city.label} ${term}`];
-  if (variant > 0) {
-    queries.push(`${city.label} ${term} ${variant % 2 === 0 ? "popüler" : "önerilen"}`);
-    queries.push(`${city.label} en iyi ${term}`);
-  }
+  const queries = buildGroupQueries(city.label, category, variant);
 
   const nested = await Promise.all(
     queries.map((q) => searchPlacesNearby(city.lat, city.lng, q, radius))
@@ -82,7 +107,11 @@ async function fetchGroup(
     limit,
     cityName: city.label,
   });
-  items = await generateRecommendationReasons(items, wizard);
+
+  if (!options?.skipReasons && items.length > 0) {
+    items = await generateRecommendationReasons(items, wizard);
+  }
+
   return items;
 }
 
@@ -187,14 +216,51 @@ export async function POST(request: Request) {
     );
 
     const combos = categoryList.flatMap((cat) => cityList.map((city) => ({ cat, city })));
-    const groups = await Promise.all(
+    const settled = await Promise.allSettled(
       combos.map(async ({ cat, city }) => ({
         category: cat,
         cityId: city.id,
         cityLabel: city.label,
-        items: await fetchGroup(city, cat, wizard, cityWeatherMap.get(city.id), [], limit, variant),
+        items: await fetchGroup(
+          city,
+          cat,
+          wizard,
+          cityWeatherMap.get(city.id),
+          [],
+          limit,
+          variant,
+          { skipReasons: true }
+        ),
       }))
     );
+
+    const groups: {
+      category: string;
+      cityId: string;
+      cityLabel: string;
+      items: PoiRecommendation[];
+    }[] = [];
+
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        groups.push(result.value);
+      } else {
+        console.warn("Grup atlandı:", result.reason);
+      }
+    }
+
+    // Tek OpenAI çağrısı — Vercel timeout riskini azaltır.
+    const allItems = groups.flatMap((g) => g.items);
+    if (allItems.length > 0) {
+      const withReasons = await generateRecommendationReasons(allItems, wizard);
+      const reasonMap = new Map(withReasons.map((r) => [r.placeId, r.reason]));
+      for (const group of groups) {
+        group.items = group.items.map((item) => ({
+          ...item,
+          reason: reasonMap.get(item.placeId) ?? item.reason,
+        }));
+      }
+    }
 
     return NextResponse.json({ groups, weather });
   } catch (error) {
