@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Trip {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  status    TripStatus @default(DRAFT)
+
+  origin        String
+  destination   String
+  originLat     Float?
+  originLng     Float?
+  destLat       Float?
+  destLng       Float?
+  startDate     DateTime
+  endDate       DateTime
+  days          Int
+
+  adults        Int      @default(1)
+  childrenAges  Int[]    @default([])
+  hasBaby       Boolean  @default(false)
+
+  transport     TransportMode @default(CAR)
+  budget        BudgetLevel   @default(MID)
+  pace          PaceLevel     @default(MODERATE)
+  foodPreferences String[]    @default([])
+
+  exploreMode       Boolean @default(false)
+  exploreIntensity  ExploreIntensity?
+  categories        String[] @default([])
+  localVsTourist    Int      @default(50)
+
+  lodgingNeeded     Boolean @default(false)
+  lodgingBreakfast  Boolean @default(false)
+  lodgingType       LodgingType?
+  lodgingPriceRange PriceRange?
+
+  weatherSummary    Json?
+  routeSummary      Json?
+
+  stops TripStop[]
+}
+
+model TripStop {
+  id        String   @id @default(cuid())
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  placeId   String?
+  name      String
+  lat       Float
+  lng       Float
+  address   String?
+  category  String?
+  stopType  StopType @default(POI)
+
+  day       Int      @default(1)
+  sortOrder Int      @default(0)
+  durationMinutes Int @default(60)
+
+  rating    Float?
+  reviewCount Int?
+  photoUrl  String?
+  reason    String?
+  evidence  Json?
+  weatherTag String?
+
+  selected  Boolean  @default(true)
+
+  @@index([tripId])
+}
+
+enum TripStatus {
+  DRAFT
+  PLANNED
+  COMPLETED
+}
+
+enum TransportMode {
+  CAR
+  TRANSIT
+  WALK
+}
+
+enum BudgetLevel {
+  BUDGET
+  MID
+  LUXURY
+}
+
+enum PaceLevel {
+  RELAXED
+  MODERATE
+  PACKED
+}
+
+enum ExploreIntensity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LodgingType {
+  HOTEL
+  PENSION
+  APART
+  ANY
+}
+
+enum PriceRange {
+  LOW
+  MID
+  HIGH
+}
+
+enum StopType {
+  POI
+  LODGING
+  FOOD
+  ORIGIN
+  DESTINATION
+}
