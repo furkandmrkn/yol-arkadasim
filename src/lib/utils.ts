@@ -2,6 +2,7 @@ import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { format, isValid, parseISO } from "date-fns";
 import { tr } from "date-fns/locale";
+import type { TripWizardData } from "@/types/trip";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -55,6 +56,61 @@ export function getIntensityStopCount(intensity?: "LOW" | "MEDIUM" | "HIGH"): nu
     default:
       return 5;
   }
+}
+
+/** Gezerek git kapalıyken varış noktası önerileri tempoya göre ölçeklenir. */
+export function getPaceRecommendationConfig(pace: "RELAXED" | "MODERATE" | "PACKED") {
+  switch (pace) {
+    case "RELAXED":
+      return { perGroup: 2, maxPages: 2, categories: ["general"] as const };
+    case "PACKED":
+      return {
+        perGroup: 4,
+        maxPages: 4,
+        categories: ["general", "food", "museum", "historic"] as const,
+      };
+    default:
+      return { perGroup: 3, maxPages: 3, categories: ["general", "food"] as const };
+  }
+}
+
+export function resolveRecommendationCategories(
+  wizard: Pick<TripWizardData, "exploreMode" | "categories" | "pace" | "planType">
+): string[] {
+  if (wizard.planType === "CITY_DAY") {
+    if (wizard.categories.length > 0) return wizard.categories;
+    return [...getPaceRecommendationConfig(wizard.pace).categories];
+  }
+  if (wizard.exploreMode) {
+    return wizard.categories.length > 0 ? wizard.categories : ["general"];
+  }
+  return [...getPaceRecommendationConfig(wizard.pace).categories];
+}
+
+export function getRecommendationMaxPages(
+  wizard: Pick<TripWizardData, "exploreMode" | "pace" | "planType">,
+  fallback = 4
+): number {
+  if (wizard.planType === "CITY_DAY" || !wizard.exploreMode) {
+    return getPaceRecommendationConfig(wizard.pace).maxPages;
+  }
+  return fallback;
+}
+
+export function getRecommendationPerGroupLimit(
+  wizard: Pick<TripWizardData, "exploreMode" | "pace" | "planType">,
+  fallback = 3
+): number {
+  if (wizard.planType === "CITY_DAY" || !wizard.exploreMode) {
+    return getPaceRecommendationConfig(wizard.pace).perGroup;
+  }
+  return fallback;
+}
+
+export function isCityDayPlan(
+  wizard: Pick<TripWizardData, "planType">
+): boolean {
+  return wizard.planType === "CITY_DAY";
 }
 
 export const RECOMMENDATION_PAGE_SIZE = 5;

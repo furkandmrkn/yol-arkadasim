@@ -147,6 +147,38 @@ export function getLocationLabel(id: string): string {
   return getLocationById(id)?.label ?? id;
 }
 
+function foldLocationKey(value: string): string {
+  return value
+    .replace(/İ/g, "i")
+    .replace(/I/g, "i")
+    .replace(/ı/g, "i")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/** ID veya görünen etiket ile bilinen şehir kaydını bulur. */
+export function resolveLocation(nameOrId: string): TurkishLocation | undefined {
+  const byId = getLocationById(nameOrId);
+  if (byId) return byId;
+
+  const key = foldLocationKey(nameOrId);
+  if (!key) return undefined;
+
+  return ALL_TURKISH_LOCATIONS.find((loc) => {
+    const labelKey = foldLocationKey(loc.label.split("(")[0].trim());
+    const fullLabelKey = foldLocationKey(loc.label);
+    return labelKey === key || fullLabelKey === key || labelKey.includes(key) || key.includes(labelKey);
+  });
+}
+
+export function resolveLocationCoords(
+  nameOrId: string
+): { lat: number; lng: number; label: string } | null {
+  const loc = resolveLocation(nameOrId);
+  if (!loc) return null;
+  return { lat: loc.lat, lng: loc.lng, label: loc.label };
+}
+
 /**
  * Verilen koordinata en yakın bilinen Türkiye lokasyonunu döndürür.
  * Bir durağın hangi şehirde olduğunu (ör. hava durumu etiketi) belirlemek için kullanılır.

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildGoogleMapsPlaceUrl } from "@/lib/google/maps";
 import { z } from "zod";
+import { normalizeTransport } from "@/lib/scoring";
+import { getTripForModify } from "@/lib/trip-auth";
+import { auth } from "@/auth";
 import type { RecommendationEvidence, TripWizardData } from "@/types/trip";
 
 function parseStopEvidence(raw: unknown): {
@@ -55,6 +58,7 @@ export async function GET(
     }
 
     const wizard: TripWizardData = {
+      planType: trip.planType ?? "TRIP",
       origin: trip.origin,
       destination: trip.destination,
       startDate: trip.startDate.toISOString().split("T")[0],
@@ -63,7 +67,7 @@ export async function GET(
       adults: trip.adults,
       childrenAges: trip.childrenAges,
       hasBaby: trip.hasBaby,
-      transport: trip.transport,
+      transport: normalizeTransport(trip.transport),
       budget: trip.budget,
       pace: trip.pace,
       foodPreferences: trip.foodPreferences,
@@ -133,6 +137,9 @@ export async function PATCH(
   { params }: { params: { tripId: string } }
 ) {
   try {
+    const access = await getTripForModify(params.tripId);
+    if (!access.ok) return access.response;
+
     const body = await request.json();
     const parsed = updateSchema.safeParse(body);
 
@@ -149,5 +156,29 @@ export async function PATCH(
   } catch (error) {
     console.error("PATCH /api/trips/[tripId] error:", error);
     return NextResponse.json({ error: "Güncellenemedi" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: { tripId: string } }
+) {
+  try {
+    const access = await getTripForModify(params.tripId);
+    if (!access.ok) return access.response;
+
+    const session = await auth();
+    if (!session?.user?.id || access.trip.userId !== session.user.id) {
+      return NextResponse.json(
+        { error: "Planı silmek için hesabınıza giriş yapmalısınız" },
+        { status: 403 }
+      );
+    }
+
+    await prisma.trip.delete({ where: { id: params.tripId } });
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("DELETE /api/trips/[tripId] error:", error);
+    return NextResponse.json({ error: "Silinemedi" }, { status: 500 });
   }
 }

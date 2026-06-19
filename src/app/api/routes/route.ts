@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getTripForModify } from "@/lib/trip-auth";
 import { getDirections } from "@/lib/google/maps";
 import { buildGoogleMapsDirectionsUrl } from "@/lib/utils";
 import { getWeatherForecast } from "@/lib/weather";
@@ -41,7 +42,8 @@ function buildTimeline(
   startDate: Date,
   days: number,
   originName: string,
-  legs: { durationMinutes: number; from: string; to: string }[]
+  legs: { durationMinutes: number; from: string; to: string }[],
+  options?: { cityDay?: boolean }
 ): TimelineDay[] {
   const routeOrdered = [...stops].sort((a, b) => a.sortOrder - b.sortOrder);
   const timeline: TimelineDay[] = [];
@@ -67,10 +69,12 @@ function buildTimeline(
       if (routeIndex === 0 && d === 1) {
         entries.push({
           kind: "travel",
-          name: `${originName} → ${stop.name}`,
+          name: options?.cityDay ? `${originName} · ${stop.name}` : `${originName} → ${stop.name}`,
           time: formatTime(clock),
           durationMinutes: travelMinutes,
-          detail: `Başlangıç noktasından yolculuk (~${travelMinutes} dk)`,
+          detail: options?.cityDay
+            ? `İlk durağa ulaşım (~${travelMinutes} dk)`
+            : `Başlangıç noktasından yolculuk (~${travelMinutes} dk)`,
         });
         clock += travelMinutes + 15;
       } else if (routeIndex > 0) {
@@ -122,6 +126,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "tripId gerekli" }, { status: 400 });
     }
 
+    const access = await getTripForModify(tripId);
+    if (!access.ok) return access.response;
+
     const trip = await prisma.trip.findUnique({
       where: { id: tripId },
       include: { stops: { where: { selected: true }, orderBy: { sortOrder: "asc" } } },
@@ -138,21 +145,25 @@ export async function POST(request: Request) {
       destLng: trip.destLng ?? 35,
     };
 
-    const poiStops = filterAlongRoute(
-      trip.stops.filter((s) => s.stopType === "POI" || s.stopType === "LODGING"),
-      corridor,
-      85
-    );
+    const isCityDay = trip.planType === "CITY_DAY";
 
-    const sortedPoiStops = sortByRouteProgress(poiStops, corridor);
+    const poiStops = isCityDay
+      ? trip.stops.filter((s) => s.stopType === "POI" || s.stopType === "LODGING")
+      : filterAlongRoute(
+          trip.stops.filter((s) => s.stopType === "POI" || s.stopType === "LODGING"),
+          corridor,
+          85
+        );
+
+    const sortedPoiStops = isCityDay
+      ? [...poiStops].sort((a, b) => a.sortOrder - b.sortOrder)
+      : sortByRouteProgress(poiStops, corridor);
     const waypoints = sortedPoiStops.map((s) => ({ lat: s.lat, lng: s.lng }));
 
     const mode =
-      trip.transport === "WALK"
-        ? "walking"
-        : trip.transport === "TRANSIT"
-          ? "transit"
-          : "driving";
+      trip.transport === "TRANSIT"
+        ? "transit"
+        : "driving";
 
     const directions = await getDirections(
       trip.origin,
@@ -179,13 +190,16 @@ export async function POST(request: Request) {
       trip.startDate,
       trip.days,
       trip.origin,
-      directions?.legs ?? []
+      directions?.legs ?? [],
+      { cityDay: isCityDay }
     );
 
     const routeSummary: RouteSummary = {
       legs: directions?.legs ?? [],
-      totalDistanceText: directions?.totalDistanceText ?? "—",
-      totalDurationText: directions?.totalDurationText ?? "—",
+      totalDistanceText: isCityDay ? "Şehir içi" : (directions?.totalDistanceText ?? "—"),
+      totalDurationText: isCityDay
+        ? `${sortedPoiStops.length} durak · tempoya göre`
+        : (directions?.totalDurationText ?? "—"),
       polyline: directions?.polyline,
       googleMapsUrl,
       timeline,

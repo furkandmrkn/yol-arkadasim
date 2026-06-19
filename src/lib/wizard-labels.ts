@@ -1,5 +1,6 @@
 import { getLocationById, getLocationLabel } from "@/data/turkish-locations";
 import { POI_CATEGORIES, type TripWizardData } from "@/types/trip";
+import { getPaceRecommendationConfig, formatShortDateTr } from "@/lib/utils";
 
 export const BUDGET_OPTIONS = [
   { value: "BUDGET", label: "Ekonomik", range: "günlük ~500–1.500 ₺ / kişi" },
@@ -10,7 +11,6 @@ export const BUDGET_OPTIONS = [
 export const TRANSPORT_LABELS: Record<TripWizardData["transport"], string> = {
   CAR: "Araba",
   TRANSIT: "Toplu taşıma",
-  WALK: "Yürüyüş",
 };
 
 export const PACE_LABELS: Record<TripWizardData["pace"], string> = {
@@ -77,12 +77,23 @@ export function getLocalVsTouristDescription(value: number): string {
   return "Dengeli — hem yerel hem turistik noktalar karışık önerilir.";
 }
 
+export const PLAN_TYPE_LABELS: Record<TripWizardData["planType"], string> = {
+  TRIP: "Seyahat planı",
+  CITY_DAY: "Şehirde gez",
+};
+
 export function buildRecommendationSummary(data: TripWizardData): string[] {
   const lines: string[] = [];
 
-  lines.push(
-    `Rota: ${getLocationLabel(data.origin)} → ${getLocationLabel(data.destination)} (${data.days} gün)`
-  );
+  if (data.planType === "CITY_DAY") {
+    lines.push(
+      `${getLocationLabel(data.destination)} · ${formatShortDateTr(data.startDate)} · gün planı`
+    );
+  } else {
+    lines.push(
+      `Rota: ${getLocationLabel(data.origin)} → ${getLocationLabel(data.destination)} (${data.days} gün)`
+    );
+  }
 
   const groupParts = [`${data.adults} yetişkin`];
   if (data.childrenAges.length > 0) {
@@ -101,13 +112,22 @@ export function buildRecommendationSummary(data: TripWizardData): string[] {
     lines.push(`Yemek tercihleri: ${data.foodPreferences.join(", ")}`);
   }
 
-  if (data.exploreMode) {
+  if (data.planType === "CITY_DAY") {
     const categories =
       data.categories.length > 0
         ? data.categories
             .map((id) => POI_CATEGORIES.find((cat) => cat.id === id)?.label ?? id)
             .join(", ")
-        : "tüm kategoriler";
+        : `tempoya göre (${PACE_LABELS[data.pace].toLowerCase()})`;
+    lines.push(`Kategoriler: ${categories}`);
+    lines.push(`Yerel ↔ Turistik: ${getLocalVsTouristDescription(data.localVsTourist)}`);
+  } else if (data.exploreMode) {
+    const categories =
+      data.categories.length > 0
+        ? data.categories
+            .map((id) => POI_CATEGORIES.find((cat) => cat.id === id)?.label ?? id)
+            .join(", ")
+        : "farketmez (karışık)";
     lines.push(
       `Gezerek git: ${data.exploreIntensity ? EXPLORE_INTENSITY_LABELS[data.exploreIntensity] : "açık"} · Kategoriler: ${categories}`
     );
@@ -123,7 +143,13 @@ export function buildRecommendationSummary(data: TripWizardData): string[] {
       lines.push("Öneri kapsamı: Rota üzerindeki seçili şehirler");
     }
   } else {
-    lines.push("Gezerek git modu kapalı — varış bölgesinde popüler turistik ve yemek noktaları arandı.");
+    const paceCfg = getPaceRecommendationConfig(data.pace);
+    const categoryLabels = paceCfg.categories
+      .map((id) => (id === "general" ? "popüler" : POI_CATEGORIES.find((c) => c.id === id)?.label ?? id))
+      .join(", ");
+    lines.push(
+      `Gezerek git kapalı — ${getLocationLabel(data.destination)} bölgesinde ${PACE_LABELS[data.pace].toLowerCase()} ile ${categoryLabels} önerileri arandı.`
+    );
   }
 
   if (data.lodgingNeeded) {

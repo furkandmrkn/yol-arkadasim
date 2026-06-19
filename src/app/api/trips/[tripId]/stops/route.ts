@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { getTripForModify } from "@/lib/trip-auth";
 import { z } from "zod";
 import {
   getProgressAlongRoute,
@@ -60,6 +61,9 @@ export async function PUT(
     if (!parsed.success) {
       return NextResponse.json({ error: "Geçersiz veri" }, { status: 400 });
     }
+
+    const access = await getTripForModify(params.tripId);
+    if (!access.ok) return access.response;
 
     const trip = await prisma.trip.findUnique({ where: { id: params.tripId } });
     if (!trip) {
@@ -152,6 +156,11 @@ export async function PUT(
     ).map((record, index) => ({ ...record, sortOrder: index }));
 
     await prisma.tripStop.createMany({ data: orderedRecords });
+
+    await prisma.trip.update({
+      where: { id: params.tripId },
+      data: { status: "PLANNED" },
+    });
 
     return NextResponse.json({ success: true, count: orderedRecords.length });
   } catch (error) {

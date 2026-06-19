@@ -34,7 +34,12 @@ export const recommendationEvidenceSchema = z.object({
 
 export type RecommendationEvidence = z.infer<typeof recommendationEvidenceSchema>;
 
-export const tripWizardSchema = z.object({
+export const PLAN_TYPES = ["TRIP", "CITY_DAY"] as const;
+export type PlanType = (typeof PLAN_TYPES)[number];
+
+export const tripWizardSchema = z
+  .object({
+  planType: z.enum(["TRIP", "CITY_DAY"]).default("TRIP"),
   origin: z.string().min(2, "Başlangıç noktası gerekli"),
   destination: z.string().min(2, "Varış noktası gerekli"),
   startDate: z.string().min(1, "Başlangıç tarihi gerekli"),
@@ -45,7 +50,7 @@ export const tripWizardSchema = z.object({
   childrenAges: z.array(z.number().int().min(0).max(17)).default([]),
   hasBaby: z.boolean().default(false),
 
-  transport: z.enum(["CAR", "TRANSIT", "WALK"]).default("CAR"),
+  transport: z.enum(["CAR", "TRANSIT"]).default("CAR"),
   budget: z.enum(["BUDGET", "MID", "LUXURY"]).default("MID"),
   pace: z.enum(["RELAXED", "MODERATE", "PACKED"]).default("MODERATE"),
   foodPreferences: z.array(z.string()).default([]),
@@ -67,7 +72,25 @@ export const tripWizardSchema = z.object({
   lodgingPlacement: z.enum(["DESTINATION", "MID_ROUTE"]).optional(),
   lodgingType: z.enum(["HOTEL", "PENSION", "APART", "ANY"]).optional(),
   lodgingPriceRange: z.enum(["LOW", "MID", "HIGH"]).optional(),
-});
+})
+  .superRefine((data, ctx) => {
+    if (data.planType === "TRIP") {
+      if (data.origin === data.destination) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Varış, başlangıçtan farklı olmalı",
+          path: ["destination"],
+        });
+      }
+    }
+    if (data.planType === "CITY_DAY" && data.lodgingNeeded) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Gün planında konaklama seçilemez",
+        path: ["lodgingNeeded"],
+      });
+    }
+  });
 
 export type TripWizardData = z.infer<typeof tripWizardSchema>;
 

@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getTripForModify } from "@/lib/trip-auth";
 import { searchPlacesNearby, type PlaceSearchResult } from "@/lib/google/maps";
-import { buildCategoryGroup, getCategorySearchTerm, buildCityMatchKeys } from "@/lib/scoring";
+import { buildCategoryGroup, buildGroupSearchQueries, buildCityMatchKeys, normalizeTransport } from "@/lib/scoring";
 import { generateRecommendationReasons } from "@/lib/llm";
 import { getWeatherForecast } from "@/lib/weather";
+import {
+  getRecommendationMaxPages,
+  getRecommendationPerGroupLimit,
+  resolveRecommendationCategories,
+} from "@/lib/utils";
 import { getProgressAlongRoute } from "@/lib/route-utils";
 import { getLocationById } from "@/data/turkish-locations";
 import type { TripWizardData, WeatherSummary, PoiRecommendation } from "@/types/trip";
@@ -20,6 +26,7 @@ interface ResolvedCity {
 
 function buildWizard(trip: NonNullable<Awaited<ReturnType<typeof prisma.trip.findUnique>>>): TripWizardData {
   return {
+    planType: trip.planType ?? "TRIP",
     origin: trip.origin,
     destination: trip.destination,
     startDate: trip.startDate.toISOString().split("T")[0],
@@ -28,7 +35,7 @@ function buildWizard(trip: NonNullable<Awaited<ReturnType<typeof prisma.trip.fin
     adults: trip.adults,
     childrenAges: trip.childrenAges,
     hasBaby: trip.hasBaby,
-    transport: trip.transport,
+    transport: normalizeTransport(trip.transport),
     budget: trip.budget,
     pace: trip.pace,
     foodPreferences: trip.foodPreferences,
@@ -48,34 +55,6 @@ function buildWizard(trip: NonNullable<Awaited<ReturnType<typeof prisma.trip.fin
   };
 }
 
-const CATEGORY_EXTRA_QUERIES: Record<string, string[]> = {
-  nature: ["tabiat parkı", "mesire alanı", "göl manzara"],
-  food: ["restoran", "yerel yemek"],
-  museum: ["müze", "arkeoloji müzesi"],
-  historic: ["tarihi yer", "kale antik"],
-  beach: ["plaj", "sahil"],
-  cave: ["mağara", "underground city"],
-  shopping: ["alışveriş merkezi", "çarşı"],
-  thermal: ["termal kaplıca"],
-};
-
-function buildGroupQueries(cityLabel: string, category: string, variant: number): string[] {
-  const term =
-    category === "general" ? "gezilecek yerler popüler" : getCategorySearchTerm(category) ?? category;
-  const queries = new Set<string>([`${cityLabel} ${term}`]);
-
-  for (const extra of CATEGORY_EXTRA_QUERIES[category] ?? []) {
-    queries.add(`${cityLabel} ${extra}`);
-  }
-
-  if (variant > 0) {
-    queries.add(`${cityLabel} ${term} popüler`);
-    queries.add(`${cityLabel} en iyi ${term}`);
-  }
-
-  return Array.from(queries).slice(0, 5);
-}
-
 async function fetchGroup(
   city: ResolvedCity,
   category: string,
@@ -86,8 +65,9 @@ async function fetchGroup(
   variant: number,
   options?: { skipReasons?: boolean }
 ): Promise<PoiRecommendation[]> {
-  const radius = 40000;
-  const queries = buildGroupQueries(city.label, category, variant);
+  const isTransit = normalizeTransport(wizard.transport) === "TRANSIT";
+  const radius = isTransit ? 25000 : 40000;
+  const queries = buildGroupSearchQueries(city.label, category, wizard, variant);
 
   const nested = await Promise.all(
     queries.map((q) => searchPlacesNearby(city.lat, city.lng, q, radius))
@@ -106,6 +86,7 @@ async function fetchGroup(
     allowedCityKeys,
     limit,
     cityName: city.label,
+    cityCenter: { lat: city.lat, lng: city.lng },
   });
 
   if (!options?.skipReasons && items.length > 0) {
@@ -134,12 +115,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "tripId gerekli" }, { status: 400 });
     }
 
+    const access = await getTripForModify(tripId);
+    if (!access.ok) return access.response;
+
     const trip = await prisma.trip.findUnique({ where: { id: tripId } });
     if (!trip) {
       return NextResponse.json({ error: "Plan bulunamadı" }, { status: 404 });
     }
 
     const wizard = buildWizard(trip);
+    const perGroupLimit = getRecommendationPerGroupLimit(wizard, limit);
+    const maxPages = getRecommendationMaxPages(wizard);
     const destLat = trip.destLat ?? 39.0;
     const destLng = trip.destLng ?? 35.0;
     const corridor = {
@@ -171,19 +157,17 @@ export async function POST(request: Request) {
         wizard,
         dayWeather,
         excludePlaceIds,
-        limit,
+        perGroupLimit,
         variant
       );
-      return NextResponse.json({ items });
+      return NextResponse.json({ items, maxPages, perGroupLimit });
     }
 
     // mode === "grouped"
     const categoryList: string[] =
       (categories as string[]).length > 0
         ? (categories as string[])
-        : trip.categories.length > 0
-          ? trip.categories
-          : ["general"];
+        : resolveRecommendationCategories(wizard);
 
     const cityList: ResolvedCity[] = (
       (cities as string[]).length > 0
@@ -227,7 +211,7 @@ export async function POST(request: Request) {
           wizard,
           cityWeatherMap.get(city.id),
           [],
-          limit,
+          perGroupLimit,
           variant,
           { skipReasons: true }
         ),
@@ -262,7 +246,7 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ groups, weather });
+    return NextResponse.json({ groups, weather, maxPages, perGroupLimit });
   } catch (error) {
     console.error("POST /api/recommendations error:", error);
     return NextResponse.json({ error: "Öneriler alınamadı" }, { status: 500 });

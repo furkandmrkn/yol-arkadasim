@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { searchLodgingAtPoints } from "@/lib/google/maps";
-import { filterLodging, buildCityMatchKeys } from "@/lib/scoring";
+import { filterLodging, buildCityMatchKeys, normalizeTransport } from "@/lib/scoring";
 import { generateRecommendationReasons } from "@/lib/llm";
 import { findCitiesAlongRoute, resolveCityLocations } from "@/lib/route-utils";
 import type { TripWizardData } from "@/types/trip";
@@ -33,6 +33,7 @@ export async function POST(request: Request) {
       (lodgingPlacement === "MID_ROUTE" ? "SELECTED_CITIES" : "DESTINATION_ONLY");
 
     const wizard: TripWizardData = {
+      planType: trip.planType ?? "TRIP",
       origin: trip.origin,
       destination: trip.destination,
       startDate: trip.startDate.toISOString().split("T")[0],
@@ -41,7 +42,7 @@ export async function POST(request: Request) {
       adults: trip.adults,
       childrenAges: trip.childrenAges,
       hasBaby: trip.hasBaby,
-      transport: trip.transport,
+      transport: normalizeTransport(trip.transport),
       budget: trip.budget,
       pace: trip.pace,
       foodPreferences: trip.foodPreferences,

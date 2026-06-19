@@ -18,9 +18,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PoiCard } from "@/components/cards/PoiCard";
-import { formatDateTr } from "@/lib/utils";
+import { formatDateTr, isCityDayPlan } from "@/lib/utils";
 import type { RouteSummary, WeatherSummary, PoiRecommendation, TimelineStop } from "@/types/trip";
 import type { TripWizardData } from "@/types/trip";
+import { useSession } from "next-auth/react";
+import { GuestSaveBanner } from "@/components/auth/GuestSaveBanner";
 
 const TripMap = dynamic(
   () => import("@/components/map/TripMap").then((mod) => mod.TripMap),
@@ -48,6 +50,7 @@ interface TripData {
 export default function TripPlanPage() {
   const params = useParams();
   const tripId = params.tripId as string;
+  const { data: session } = useSession();
 
   const [trip, setTrip] = useState<TripData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -139,6 +142,8 @@ export default function TripPlanPage() {
     return `~${stop.durationMinutes} dk`;
   };
 
+  const cityDay = isCityDayPlan(trip.wizard);
+
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
@@ -149,12 +154,23 @@ export default function TripPlanPage() {
             </Link>
           </Button>
           <h1 className="text-2xl md:text-3xl font-bold">
-            {trip.wizard.origin} → {trip.wizard.destination}
+            {cityDay
+              ? `${trip.wizard.destination}'da gün planı`
+              : `${trip.wizard.origin} → ${trip.wizard.destination}`}
           </h1>
           <p className="text-muted-foreground">
-            {formatDateTr(trip.wizard.startDate)} — {formatDateTr(trip.wizard.endDate)} ·{" "}
-            {trip.wizard.days} gün · {trip.wizard.adults} yetişkin
-            {trip.wizard.childrenAges.length > 0 && ` · ${trip.wizard.childrenAges.length} çocuk`}
+            {cityDay ? (
+              <>
+                {formatDateTr(trip.wizard.startDate)} · {trip.wizard.adults} yetişkin
+                {trip.wizard.childrenAges.length > 0 && ` · ${trip.wizard.childrenAges.length} çocuk`}
+              </>
+            ) : (
+              <>
+                {formatDateTr(trip.wizard.startDate)} — {formatDateTr(trip.wizard.endDate)} ·{" "}
+                {trip.wizard.days} gün · {trip.wizard.adults} yetişkin
+                {trip.wizard.childrenAges.length > 0 && ` · ${trip.wizard.childrenAges.length} çocuk`}
+              </>
+            )}
           </p>
         </div>
         <div className="flex gap-2">
@@ -172,12 +188,14 @@ export default function TripPlanPage() {
         </div>
       </div>
 
+      {!session?.user && <GuestSaveBanner className="mb-8" />}
+
       <div className="grid lg:grid-cols-3 gap-6 mb-8">
         {route && (
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">
-                <RouteIcon className="h-4 w-4" /> Rota Özeti
+                <RouteIcon className="h-4 w-4" /> {cityDay ? "Gün Özeti" : "Rota Özeti"}
               </CardTitle>
             </CardHeader>
             <CardContent>

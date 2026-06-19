@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ArrowRight, Loader2, Info, RefreshCw, MapPin, ChevronDown, ChevronUp } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Info, RefreshCw, MapPin, ChevronDown, ChevronUp, Route, Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,7 +18,14 @@ import { DatePicker } from "@/components/wizard/DatePicker";
 import { SearchLoadingOverlay } from "@/components/wizard/SearchLoadingOverlay";
 import { getLocationLabel } from "@/data/turkish-locations";
 import { getRouteCityOptions } from "@/lib/route-utils";
-import { formatShortDateTr, startOfDay } from "@/lib/utils";
+import {
+  formatShortDateTr,
+  startOfDay,
+  getRecommendationMaxPages,
+  getRecommendationPerGroupLimit,
+  resolveRecommendationCategories,
+  isCityDayPlan,
+} from "@/lib/utils";
 import {
   BUDGET_OPTIONS,
   LODGING_AMENITY_OPTIONS,
@@ -26,6 +33,7 @@ import {
   buildRecommendationSummary,
   buildLodgingSearchSummary,
   getLocalVsTouristDescription,
+  PLAN_TYPE_LABELS,
 } from "@/lib/wizard-labels";
 import {
   tripWizardSchema,
@@ -36,15 +44,24 @@ import {
 } from "@/types/trip";
 import { differenceInDays, parseISO } from "date-fns";
 
-const STEPS = [
+const TRIP_STEPS = [
   "Rota & Tarih",
   "Grup & Tercihler",
   "Gezerek Git",
   "Öneriler",
   "Konaklama & Özet",
-];
+] as const;
+
+const CITY_DAY_STEPS = [
+  "Şehir & Tarih",
+  "Grup & Tercihler",
+  "Ne gezmek istersiniz?",
+  "Öneriler",
+  "Özet",
+] as const;
 
 const defaultWizard: TripWizardData = {
+  planType: "TRIP",
   origin: "",
   destination: "",
   startDate: "",
@@ -72,8 +89,8 @@ const defaultWizard: TripWizardData = {
   lodgingPriceRange: "MID",
 };
 
-const POI_PER_GROUP = 3;
-const POI_MAX_PAGES = 4;
+const DEFAULT_POI_PER_GROUP = 3;
+const DEFAULT_POI_MAX_PAGES = 4;
 
 interface RecGroupState {
   key: string;
@@ -111,9 +128,23 @@ export function TripWizard() {
   const [lodgingSearched, setLodgingSearched] = useState(false);
   const [searchOverlay, setSearchOverlay] = useState<{ title: string; lines: string[] } | null>(null);
 
+  const [recMeta, setRecMeta] = useState({ perGroup: DEFAULT_POI_PER_GROUP, maxPages: DEFAULT_POI_MAX_PAGES });
+
+  const isCityDay = isCityDayPlan(data);
+  const steps = isCityDay ? CITY_DAY_STEPS : TRIP_STEPS;
+
+  const poiPerGroup = useMemo(
+    () => getRecommendationPerGroupLimit(data, DEFAULT_POI_PER_GROUP),
+    [data.exploreMode, data.pace, data.planType]
+  );
+  const poiMaxPages = useMemo(
+    () => getRecommendationMaxPages(data, DEFAULT_POI_MAX_PAGES),
+    [data.exploreMode, data.pace, data.planType]
+  );
+
   const selectedPoiCategories = useMemo(
-    () => (data.categories.length > 0 ? data.categories : ["general"]),
-    [data.categories]
+    () => resolveRecommendationCategories(data),
+    [data.exploreMode, data.categories, data.pace, data.planType]
   );
 
   const selectedPoiCityIds = useMemo(() => {
@@ -174,31 +205,55 @@ export function TripWizard() {
     });
   };
 
+  const setPlanType = (planType: TripWizardData["planType"]) => {
+    if (planType === data.planType) return;
+    if (planType === "CITY_DAY") {
+      update({
+        planType,
+        exploreMode: true,
+        lodgingNeeded: false,
+        transport: "TRANSIT",
+        origin: data.destination,
+        endDate: data.startDate || data.endDate,
+        days: data.startDate ? 1 : data.days,
+      });
+    } else {
+      update({
+        planType,
+        exploreMode: false,
+        lodgingNeeded: false,
+        origin: data.origin === data.destination ? "" : data.origin,
+      });
+    }
+    setErrors({});
+  };
+
   const validateStep = (): boolean => {
     const newErrors: Record<string, string> = {};
     if (step === 0) {
-      if (!data.origin) newErrors.origin = "Başlangıç şehri seçin";
-      if (!data.destination) newErrors.destination = "Varış şehri seçin";
-      if (data.origin && data.destination && data.origin === data.destination) {
-        newErrors.destination = "Varış, başlangıçtan farklı olmalı";
-      }
-      if (!data.startDate) newErrors.startDate = "Başlangıç tarihi seçin";
-      if (!data.endDate) newErrors.endDate = "Bitiş tarihi seçin";
-      if (data.startDate && data.endDate && data.endDate < data.startDate) {
-        newErrors.endDate = "Bitiş tarihi, başlangıçtan önce olamaz";
+      if (isCityDay) {
+        if (!data.destination) newErrors.destination = "Şehir seçin";
+        if (!data.startDate) newErrors.startDate = "Tarih seçin";
+      } else {
+        if (!data.origin) newErrors.origin = "Başlangıç şehri seçin";
+        if (!data.destination) newErrors.destination = "Varış şehri seçin";
+        if (data.origin && data.destination && data.origin === data.destination) {
+          newErrors.destination = "Varış, başlangıçtan farklı olmalı";
+        }
+        if (!data.startDate) newErrors.startDate = "Başlangıç tarihi seçin";
+        if (!data.endDate) newErrors.endDate = "Bitiş tarihi seçin";
+        if (data.startDate && data.endDate && data.endDate < data.startDate) {
+          newErrors.endDate = "Bitiş tarihi, başlangıçtan önce olamaz";
+        }
       }
     }
-    if (step === 2) {
-      if (data.exploreMode) {
-        if (data.categories.length === 0) {
-          newErrors.categories = "En az bir kategori seçin";
-        }
-        if (
-          data.recommendationScope === "SELECTED_CITIES" &&
-          data.selectedRouteCities.length === 0
-        ) {
-          newErrors.routeCities = "En az bir şehir seçin";
-        }
+    if (step === 2 && !isCityDay) {
+      if (
+        data.exploreMode &&
+        data.recommendationScope === "SELECTED_CITIES" &&
+        data.selectedRouteCities.length === 0
+      ) {
+        newErrors.routeCities = "En az bir şehir seçin";
       }
       if (
         data.lodgingNeeded &&
@@ -216,13 +271,38 @@ export function TripWizard() {
   };
 
   const createTrip = async () => {
-    const parsed = tripWizardSchema.safeParse(data);
-    if (!parsed.success) return null;
+    const wizardPayload = isCityDay
+      ? {
+          ...data,
+          origin: data.destination,
+          endDate: data.startDate,
+          days: 1,
+          exploreMode: true,
+          lodgingNeeded: false,
+        }
+      : data;
+
+    const parsed = tripWizardSchema.safeParse(wizardPayload);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0]?.message ?? "Form verisi geçersiz";
+      throw new Error(firstIssue);
+    }
 
     const payload = {
       ...parsed.data,
-      origin: getLocationLabel(parsed.data.origin),
+      origin:
+        parsed.data.planType === "CITY_DAY"
+          ? getLocationLabel(parsed.data.destination)
+          : getLocationLabel(parsed.data.origin),
       destination: getLocationLabel(parsed.data.destination),
+      ...(parsed.data.planType === "CITY_DAY"
+        ? {
+            endDate: parsed.data.startDate,
+            days: 1,
+            exploreMode: true,
+            lodgingNeeded: false,
+          }
+        : {}),
     };
 
     const res = await fetch("/api/trips", {
@@ -230,7 +310,19 @@ export function TripWizard() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error("Trip oluşturulamadı");
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        hint?: string;
+        details?: { fieldErrors?: Record<string, string[]> };
+      };
+      const fieldMsg = body.details?.fieldErrors
+        ? Object.values(body.details.fieldErrors).flat()[0]
+        : undefined;
+      throw new Error(
+        [body.error ?? "Trip oluşturulamadı", fieldMsg, body.hint].filter(Boolean).join(" — ")
+      );
+    }
     const trip = await res.json();
     setTripId(trip.id);
     return trip.id as string;
@@ -245,7 +337,7 @@ export function TripWizard() {
         mode: "grouped",
         categories: selectedPoiCategories,
         cities: selectedPoiCityIds,
-        limit: POI_PER_GROUP,
+        limit: poiPerGroup,
         variant: 0,
       }),
     });
@@ -257,6 +349,9 @@ export function TripWizard() {
       cityLabel: string;
       items: PoiRecommendation[];
     }[];
+    const perGroup = (result.perGroupLimit as number | undefined) ?? poiPerGroup;
+    const maxPages = (result.maxPages as number | undefined) ?? poiMaxPages;
+    setRecMeta({ perGroup, maxPages });
 
     const groupStates: RecGroupState[] = groups.map((g) => ({
       key: `${g.category}__${g.cityId}`,
@@ -267,7 +362,7 @@ export function TripWizard() {
       pages: [g.items],
       page: 1,
       loading: false,
-      exhausted: g.items.length < POI_PER_GROUP,
+      exhausted: g.items.length < perGroup,
     }));
 
     setRecGroups(groupStates);
@@ -301,13 +396,14 @@ export function TripWizard() {
           category: group.category,
           cityId: group.cityId,
           excludePlaceIds,
-          limit: POI_PER_GROUP,
+          limit: recMeta.perGroup,
           variant: targetPage - 1,
         }),
       });
       if (!res.ok) throw new Error("Öneriler alınamadı");
       const result = await res.json();
       const items = (result.items ?? []) as PoiRecommendation[];
+      const perGroup = (result.perGroupLimit as number | undefined) ?? recMeta.perGroup;
 
       setRecGroups((prev) =>
         prev.map((g) => {
@@ -322,7 +418,7 @@ export function TripWizard() {
             pages,
             page: targetPage,
             loading: false,
-            exhausted: items.length < POI_PER_GROUP,
+            exhausted: items.length < perGroup,
           };
         })
       );
@@ -532,24 +628,25 @@ export function TripWizard() {
       if (step === 2) {
         let id = tripId;
         if (!id) id = await createTrip();
-        if (id) {
-          setSearchOverlay({
+        if (!id) {
+          throw new Error("Plan kaydı oluşturulamadı. Lütfen tekrar deneyin.");
+        }
+        setSearchOverlay({
             title: "Öneriler aranıyor",
             lines: buildRecommendationSummary(data),
           });
           await fetchGroupedRecommendations(id);
           setSearchOverlay(null);
-        }
         setStep(3);
       } else if (step === 3) {
         setStep(4);
       } else if (step === 4) {
         if (tripId) {
           setSearchOverlay({
-            title: "Planınız hazırlanıyor",
+            title: isCityDay ? "Gün planınız hazırlanıyor" : "Planınız hazırlanıyor",
             lines: [
               "Seçtiğiniz duraklar kaydediliyor",
-              data.lodgingNeeded ? "Konaklama rotaya ekleniyor" : "Rota hesaplanıyor",
+              isCityDay ? "Duraklar sıralanıyor" : data.lodgingNeeded ? "Konaklama rotaya ekleniyor" : "Rota hesaplanıyor",
               "Google Maps bağlantısı oluşturuluyor",
             ],
           });
@@ -635,16 +732,16 @@ export function TripWizard() {
     setChildAgeInput("");
   };
 
-  const progress = ((step + 1) / STEPS.length) * 100;
-
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-2">Yeni Seyahat Planı</h1>
+        <h1 className="text-2xl font-bold mb-2">
+          {isCityDay ? "Şehirde Gez" : "Yeni Seyahat Planı"}
+        </h1>
         <p className="text-muted-foreground text-sm mb-4">
-          Adım {step + 1}/{STEPS.length}: {STEPS[step]}
+          Adım {step + 1}/{steps.length}: {steps[step]}
         </p>
-        <Progress value={progress} className="h-2" />
+        <Progress value={((step + 1) / steps.length) * 100} className="h-2" />
       </div>
 
       {errors.general && (
@@ -656,58 +753,127 @@ export function TripWizard() {
       {step === 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Nereye, ne zaman?</CardTitle>
-            <CardDescription>Başlangıç ve varış noktanızı, seyahat tarihlerinizi girin.</CardDescription>
+            <CardTitle>{isCityDay ? "Hangi şehir, hangi gün?" : "Nereye, ne zaman?"}</CardTitle>
+            <CardDescription>
+              {isCityDay
+                ? "Bugün veya planladığınız gün için tek şehirde gezi planı oluşturun."
+                : "Başlangıç ve varış noktanızı, seyahat tarihlerinizi girin."}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <CitySelect
-                id="origin"
-                label="Nereden"
-                value={data.origin}
-                onChange={(id) => update({ origin: id })}
-                excludeId={data.destination}
-                error={errors.origin}
-              />
-              <CitySelect
-                id="destination"
-                label="Nereye"
-                value={data.destination}
-                onChange={(id) => update({ destination: id })}
-                excludeId={data.origin}
-                error={errors.destination}
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setPlanType("TRIP")}
+                className={`flex items-start gap-3 rounded-lg border p-4 text-left transition-colors ${
+                  data.planType === "TRIP" ? "border-primary bg-accent/40" : "hover:bg-muted/50"
+                }`}
+              >
+                <Route className="h-5 w-5 shrink-0 mt-0.5 text-primary" />
+                <span>
+                  <span className="font-medium block">{PLAN_TYPE_LABELS.TRIP}</span>
+                  <span className="text-xs text-muted-foreground">
+                    A → B rota, çok günlük seyahat
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPlanType("CITY_DAY")}
+                className={`flex items-start gap-3 rounded-lg border p-4 text-left transition-colors ${
+                  data.planType === "CITY_DAY" ? "border-primary bg-accent/40" : "hover:bg-muted/50"
+                }`}
+              >
+                <Building2 className="h-5 w-5 shrink-0 mt-0.5 text-primary" />
+                <span>
+                  <span className="font-medium block">{PLAN_TYPE_LABELS.CITY_DAY}</span>
+                  <span className="text-xs text-muted-foreground">
+                    Tek şehirde gün planı — seyahat değil
+                  </span>
+                </span>
+              </button>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <DatePicker
-                id="startDate"
-                label="Başlangıç"
-                value={data.startDate}
-                onChange={(iso) => {
-                  const next: Partial<TripWizardData> = { startDate: iso };
-                  if (data.endDate && iso && data.endDate < iso) {
-                    next.endDate = iso;
+
+            {isCityDay ? (
+              <>
+                <CitySelect
+                  id="cityDayDestination"
+                  label="Hangi şehir?"
+                  value={data.destination}
+                  onChange={(id) =>
+                    update({
+                      destination: id,
+                      origin: id,
+                      endDate: data.startDate || data.endDate,
+                      days: 1,
+                    })
                   }
-                  update(next);
-                }}
-                placeholder="gg/aa/yyyy"
-                minDate={startOfDay(new Date())}
-                error={errors.startDate}
-              />
-              <DatePicker
-                id="endDate"
-                label="Bitiş"
-                value={data.endDate}
-                onChange={(iso) => update({ endDate: iso })}
-                placeholder="gg/aa/yyyy"
-                minDate={
-                  data.startDate ? startOfDay(parseISO(data.startDate)) : startOfDay(new Date())
-                }
-                error={errors.endDate}
-              />
-            </div>
-            {data.days > 0 && (
-              <p className="text-sm text-muted-foreground">Toplam: {data.days} gün</p>
+                  error={errors.destination}
+                />
+                <DatePicker
+                  id="cityDayDate"
+                  label="Hangi gün?"
+                  value={data.startDate}
+                  onChange={(iso) =>
+                    update({ startDate: iso, endDate: iso, days: 1, origin: data.destination })
+                  }
+                  placeholder="gg/aa/yyyy"
+                  minDate={startOfDay(new Date())}
+                  error={errors.startDate}
+                />
+              </>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <CitySelect
+                    id="origin"
+                    label="Nereden"
+                    value={data.origin}
+                    onChange={(id) => update({ origin: id })}
+                    excludeId={data.destination}
+                    error={errors.origin}
+                  />
+                  <CitySelect
+                    id="destination"
+                    label="Nereye"
+                    value={data.destination}
+                    onChange={(id) => update({ destination: id })}
+                    excludeId={data.origin}
+                    error={errors.destination}
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <DatePicker
+                    id="startDate"
+                    label="Başlangıç"
+                    value={data.startDate}
+                    onChange={(iso) => {
+                      const next: Partial<TripWizardData> = { startDate: iso };
+                      if (data.endDate && iso && data.endDate < iso) {
+                        next.endDate = iso;
+                      }
+                      update(next);
+                    }}
+                    placeholder="gg/aa/yyyy"
+                    minDate={startOfDay(new Date())}
+                    error={errors.startDate}
+                  />
+                  <DatePicker
+                    id="endDate"
+                    label="Bitiş"
+                    value={data.endDate}
+                    onChange={(iso) => update({ endDate: iso })}
+                    placeholder="gg/aa/yyyy"
+                    minDate={
+                      data.startDate ? startOfDay(parseISO(data.startDate)) : startOfDay(new Date())
+                    }
+                    error={errors.endDate}
+                  />
+                </div>
+                {data.days > 0 && (
+                  <p className="text-sm text-muted-foreground">Toplam: {data.days} gün</p>
+                )}
+              </>
             )}
           </CardContent>
         </Card>
@@ -778,9 +944,13 @@ export function TripWizard() {
                   <SelectContent>
                     <SelectItem value="CAR">Araba</SelectItem>
                     <SelectItem value="TRANSIT">Toplu taşıma</SelectItem>
-                    <SelectItem value="WALK">Yürüyüş</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {data.transport === "TRANSIT"
+                    ? "Merkeze yakın, toplu taşımayla ulaşılabilir yerler önceliklendirilir."
+                    : "Rota dışı doğa ve kırsal noktalar da önerilebilir."}
+                </p>
               </div>
               <div>
                 <Label>Bütçe</Label>
@@ -829,10 +999,73 @@ export function TripWizard() {
       {step === 2 && (
         <Card>
           <CardHeader>
-            <CardTitle>Gezerek git</CardTitle>
-            <CardDescription>Yolda duraklar eklemek ister misiniz?</CardDescription>
+            <CardTitle>{isCityDay ? "Ne gezmek istersiniz?" : "Gezerek git"}</CardTitle>
+            <CardDescription>
+              {isCityDay
+                ? `${getLocationLabel(data.destination)} için ilgi alanlarınızı seçin. Tempo bir önceki adımdan gelir.`
+                : "Yolda duraklar eklemek ister misiniz?"}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
+            {isCityDay ? (
+              <>
+                <p className="text-sm text-muted-foreground rounded-lg border bg-muted/30 p-3">
+                  Kategori seçmezseniz <strong>tempoya</strong> göre karışık öneriler aranır. Seçerseniz
+                  yalnızca o tür yerler listelenir.
+                </p>
+                <div>
+                  <Label className="mb-2 block">Kategoriler</Label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {POI_CATEGORIES.map((cat) => (
+                      <label
+                        key={cat.id}
+                        className={`flex items-center gap-2 p-3 rounded-md border cursor-pointer text-sm ${
+                          data.categories.includes(cat.id) ? "border-primary bg-accent" : ""
+                        }`}
+                      >
+                        <Checkbox
+                          checked={data.categories.includes(cat.id)}
+                          onCheckedChange={() => toggleCategory(cat.id)}
+                        />
+                        {cat.label}
+                      </label>
+                    ))}
+                  </div>
+                  {data.categories.length === 0 && (
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Farketmez — tempoya göre karışık öneriler aranacak.
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <Label>Yerel ↔ Turistik</Label>
+                  <div className="flex items-center gap-4 mt-2">
+                    <span className="text-xs text-muted-foreground">Yerel</span>
+                    <Slider
+                      value={[data.localVsTourist]}
+                      onValueChange={([v]) => update({ localVsTourist: v })}
+                      max={100}
+                      step={1}
+                      className="flex-1"
+                    />
+                    <span className="text-xs text-muted-foreground">Turistik</span>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground flex items-start gap-1.5">
+                    <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    {getLocalVsTouristDescription(data.localVsTourist)}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+            {!data.exploreMode && (
+              <p className="text-sm text-muted-foreground rounded-lg border bg-muted/30 p-3">
+                Gezerek git kapalıyken öneriler yalnızca varış noktanızda aranır. Gösterilecek öneri
+                sayısı bir önceki adımda seçtiğiniz <strong>tempoya</strong> göre belirlenir — rahat
+                tempoda daha az, yoğun tempoda daha çok ve çeşitli öneri sunulur.
+              </p>
+            )}
+
             <div className="flex items-center justify-between">
               <div>
                 <Label className="text-base">Gezerek git modu</Label>
@@ -873,6 +1106,9 @@ export function TripWizard() {
 
                 <div>
                   <Label className="mb-2 block">Kategoriler</Label>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Hiçbir kategori seçmezseniz kategori filtresi uygulanmadan karışık öneriler aranır.
+                  </p>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     {POI_CATEGORIES.map((cat) => (
                       <label
@@ -889,6 +1125,11 @@ export function TripWizard() {
                       </label>
                     ))}
                   </div>
+                  {data.categories.length === 0 && (
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Farketmez — tüm kategorilerden karışık öneriler aranacak.
+                    </p>
+                  )}
                   {errors.categories && (
                     <p className="text-xs text-destructive mt-1">{errors.categories}</p>
                   )}
@@ -1133,6 +1374,8 @@ export function TripWizard() {
                 )}
               </div>
             )}
+              </>
+            )}
           </CardContent>
         </Card>
       )}
@@ -1273,7 +1516,12 @@ export function TripWizard() {
                               <div className="flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-1">
                                   {Array.from(
-                                    { length: Math.min(POI_MAX_PAGES, group.exhausted ? group.pages.length : group.pages.length + 1) },
+                                    {
+                                      length: Math.min(
+                                        recMeta.maxPages,
+                                        group.exhausted ? group.pages.length : group.pages.length + 1
+                                      ),
+                                    },
                                     (_, i) => i + 1
                                   ).map((page) => (
                                     <Button
@@ -1312,7 +1560,7 @@ export function TripWizard() {
 
       {step === 4 && (
         <div className="space-y-4">
-          {data.lodgingNeeded && (
+          {!isCityDay && data.lodgingNeeded && (
             <Card>
               <CardHeader>
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
@@ -1469,15 +1717,26 @@ export function TripWizard() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Plan özeti</CardTitle>
+              <CardTitle>{isCityDay ? "Gün planı özeti" : "Plan özeti"}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <p><strong>Rota:</strong> {getLocationLabel(data.origin)} → {getLocationLabel(data.destination)}</p>
-              <p><strong>Tarih:</strong> {formatShortDateTr(data.startDate)} — {formatShortDateTr(data.endDate)} ({data.days} gün)</p>
+              {isCityDay ? (
+                <>
+                  <p><strong>Şehir:</strong> {getLocationLabel(data.destination)}</p>
+                  <p><strong>Tarih:</strong> {formatShortDateTr(data.startDate)}</p>
+                </>
+              ) : (
+                <>
+                  <p><strong>Rota:</strong> {getLocationLabel(data.origin)} → {getLocationLabel(data.destination)}</p>
+                  <p><strong>Tarih:</strong> {formatShortDateTr(data.startDate)} — {formatShortDateTr(data.endDate)} ({data.days} gün)</p>
+                </>
+              )}
               <p><strong>Grup:</strong> {data.adults} yetişkin, {data.childrenAges.length} çocuk</p>
               <p><strong>Seçilen durak:</strong> {selectedStops.size} yer</p>
               <p className="text-muted-foreground pt-2">
-                Planı oluştur dediğinizde rota hesaplanacak ve paylaşılabilir plan sayfasına yönlendirileceksiniz.
+                {isCityDay
+                  ? "Gün planını oluştur dediğinizde duraklar sıralanacak ve paylaşılabilir plan sayfasına yönlendirileceksiniz."
+                  : "Planı oluştur dediğinizde rota hesaplanacak ve paylaşılabilir plan sayfasına yönlendirileceksiniz."}
               </p>
             </CardContent>
           </Card>
@@ -1490,7 +1749,7 @@ export function TripWizard() {
         </Button>
         <Button onClick={handleNext} disabled={loading || lodgingLoading || !!searchOverlay}>
           {loading && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
-          {step === 4 ? "Planı Oluştur" : "İleri"}
+          {step === 4 ? (isCityDay ? "Gün Planını Oluştur" : "Planı Oluştur") : "İleri"}
           {step < 4 && !loading && <ArrowRight className="h-4 w-4 ml-1" />}
         </Button>
       </div>

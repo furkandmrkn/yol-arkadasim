@@ -1,7 +1,12 @@
 import type { TripWizardData, PoiRecommendation, WeatherSummary } from "@/types/trip";
 import type { PlaceSearchResult } from "@/lib/google/maps";
 import { POI_CATEGORIES } from "@/types/trip";
-import { getIntensityStopCount } from "@/lib/utils";
+import {
+  compareRecommendationRank,
+  computePopularityScore,
+  scoreLocalVsTouristFit,
+} from "@/lib/scoring/popularity";
+import { getIntensityStopCount, getPaceRecommendationConfig } from "@/lib/utils";
 import { getWeatherTagForPoi } from "@/lib/weather";
 import {
   type RouteCorridor,
@@ -34,6 +39,264 @@ const CATEGORY_SEARCH_TERMS: Record<string, string> = {
 
 const FOOD_TYPES = new Set(["restaurant", "cafe", "bakery", "meal_takeaway", "bar"]);
 const NATURE_TYPES = new Set(["park", "natural_feature", "campground", "national_park"]);
+
+/** Toplu taşımayla genelde ulaşılamayan kırsal/doğa kategorileri */
+const TRANSIT_REMOTE_CATEGORIES = new Set(["nature", "beach", "cave"]);
+
+const CAR_CATEGORY_QUERIES: Record<string, string[]> = {
+  nature: ["tabiat parkı", "mesire alanı", "göl manzara"],
+  food: ["restoran", "yerel yemek"],
+  museum: ["müze", "arkeoloji müzesi"],
+  historic: ["tarihi yer", "kale antik"],
+  beach: ["plaj", "sahil"],
+  cave: ["mağara", "underground city"],
+  shopping: ["alışveriş merkezi", "çarşı"],
+  thermal: ["termal kaplıca"],
+};
+
+const TRANSIT_CATEGORY_QUERIES: Record<string, string[]> = {
+  nature: ["şehir parkı", "kent parkı", "botanik bahçe"],
+  food: ["merkez restoran", "lokanta"],
+  museum: ["müze", "müzesi"],
+  historic: ["tarihi merkez", "kale"],
+  beach: ["sahil", "plaj"],
+  shopping: ["alışveriş merkezi", "çarşı"],
+  thermal: ["spa termal merkez"],
+};
+
+export interface CityCenter {
+  lat: number;
+  lng: number;
+}
+
+export function normalizeTransport(transport: string): TripWizardData["transport"] {
+  return transport === "TRANSIT" ? "TRANSIT" : "CAR";
+}
+
+function foldedPlaceText(place: PlaceSearchResult): string {
+  const review = place.reviews?.[0]?.text ?? "";
+  return foldTr(`${place.name} ${place.address ?? ""} ${review}`);
+}
+
+/** Toplu taşımayla makul ulaşılabilirlik — şehir merkezine uzak kırsal noktalar elenir. */
+export function isAccessibleByTransit(
+  place: PlaceSearchResult,
+  category: string,
+  cityCenter: CityCenter | undefined
+): boolean {
+  if (!cityCenter) return true;
+
+  const distKm = haversineKm(
+    { lat: place.lat, lng: place.lng },
+    { lat: cityCenter.lat, lng: cityCenter.lng }
+  );
+
+  if (place.types.includes("natural_feature") && distKm > 5) return false;
+  if (TRANSIT_REMOTE_CATEGORIES.has(category) && distKm > 7) return false;
+  if (distKm > 14) return false;
+
+  return true;
+}
+
+function scoreFoodPreferences(place: PlaceSearchResult, prefs: string[]): number {
+  if (prefs.length === 0) return 0;
+
+  const text = foldedPlaceText(place);
+  let delta = 0;
+
+  const servesAlcohol = place.types.includes("bar") || place.types.includes("night_club");
+
+  if (prefs.includes("İçkili (alkollü) mekan")) {
+    delta += servesAlcohol ? 12 : -4;
+  }
+  if (prefs.includes("İçkisiz (alkolsüz) mekan")) {
+    delta += servesAlcohol ? -12 : 6;
+  }
+  if (prefs.includes("Yerel mutfak")) {
+    if (/yerel|local|geleneksel|otantik|ev yemek/.test(text)) delta += 10;
+  }
+  if (prefs.includes("Vejetaryen")) {
+    if (/vejetaryen|vegetarian/.test(text)) delta += 14;
+    if (/vegan/.test(text)) delta += 10;
+  }
+  if (prefs.includes("Vegan")) {
+    if (/vegan/.test(text)) delta += 16;
+    if (/et lok|kebap|steakhouse|ocakba/.test(text) && !/vegan|vejetaryen/.test(text)) delta -= 10;
+  }
+  if (prefs.includes("Helal")) {
+    if (/helal|halal/.test(text)) delta += 14;
+  }
+  if (prefs.includes("Glutensiz")) {
+    if (/glutensiz|gluten free|gluten-free|çölyak/.test(text)) delta += 14;
+  }
+  if (prefs.includes("Deniz ürünleri")) {
+    if (/balık|balik|seafood|deniz ürün|ahtapot|karides|midye/.test(text)) delta += 14;
+    if (place.types.includes("restaurant") && /balık|balik|fish/.test(foldTr(place.name))) delta += 8;
+  }
+
+  return delta;
+}
+
+function scoreTransportFit(
+  place: PlaceSearchResult,
+  category: string,
+  wizard: TripWizardData,
+  cityCenter: CityCenter | undefined
+): number {
+  if (wizard.transport !== "TRANSIT") {
+    if (["nature", "beach", "cave"].includes(category)) return 8;
+    return 0;
+  }
+
+  if (!cityCenter) return 0;
+
+  const distKm = haversineKm(
+    { lat: place.lat, lng: place.lng },
+    { lat: cityCenter.lat, lng: cityCenter.lng }
+  );
+  let delta = 0;
+
+  if (distKm <= 3) delta += 12;
+  else if (distKm <= 6) delta += 6;
+  else if (distKm <= 10) delta -= 5;
+  else delta -= 20;
+
+  if (["museum", "historic", "food", "shopping"].includes(category) && distKm <= 8) delta += 8;
+  if (TRANSIT_REMOTE_CATEGORIES.has(category)) delta -= 15;
+  if (place.types.includes("natural_feature")) delta -= 12;
+
+  return delta;
+}
+
+function appendBudgetSearchQueries(
+  queries: Set<string>,
+  cityLabel: string,
+  category: string,
+  budget: TripWizardData["budget"]
+): void {
+  if (category !== "food" && category !== "general") return;
+  if (budget === "BUDGET") {
+    queries.add(`${cityLabel} uygun fiyat restoran`);
+    queries.add(`${cityLabel} ekonomik yemek`);
+  }
+  if (budget === "LUXURY") {
+    queries.add(`${cityLabel} fine dining lüks restoran`);
+    queries.add(`${cityLabel} özel restoran`);
+  }
+}
+
+function scoreBudgetFit(place: PlaceSearchResult, wizard: TripWizardData, category: string): number {
+  const pl = place.priceLevel;
+  if (pl == null) return 0;
+
+  let delta = 0;
+  if (wizard.budget === "BUDGET") {
+    if (pl <= 1) delta += 14;
+    else if (pl === 2) delta += 5;
+    else if (pl >= 3) delta -= 18;
+  } else if (wizard.budget === "LUXURY") {
+    if (pl >= 4) delta += 14;
+    else if (pl === 3) delta += 8;
+    else if (pl <= 1) delta -= 12;
+  } else {
+    if (pl === 2) delta += 8;
+    else if (pl === 1 || pl === 3) delta += 3;
+  }
+
+  if (category === "food") {
+    delta = Math.round(delta * 1.2);
+  }
+
+  return delta;
+}
+
+/** Gezerek git kapalıyken tempo, öneri çeşitliliğini ve kalite beklentisini yansıtır. */
+function scorePaceDestinationFit(place: PlaceSearchResult, wizard: TripWizardData): number {
+  if (wizard.exploreMode) return 0;
+
+  const reviews = place.reviewCount ?? 0;
+  const rating = place.rating ?? 0;
+
+  if (wizard.pace === "RELAXED") {
+    if (reviews > 15000) return -10;
+    if (reviews < 4000) return 6;
+    return 3;
+  }
+  if (wizard.pace === "PACKED") {
+    if (rating >= 4.6) return 12;
+    if (rating >= 4.3) return 6;
+    if (reviews > 5000) return 5;
+    return -4;
+  }
+  return 0;
+}
+
+function appendFoodSearchQueries(queries: Set<string>, cityLabel: string, prefs: string[]): void {
+  if (prefs.includes("Yerel mutfak")) queries.add(`${cityLabel} yerel yemek restoran`);
+  if (prefs.includes("İçkili (alkollü) mekan")) queries.add(`${cityLabel} meyhane restoran`);
+  if (prefs.includes("İçkisiz (alkolsüz) mekan")) queries.add(`${cityLabel} aile restoranı`);
+  if (prefs.includes("Vejetaryen")) queries.add(`${cityLabel} vejetaryen restoran`);
+  if (prefs.includes("Vegan")) queries.add(`${cityLabel} vegan restoran`);
+  if (prefs.includes("Helal")) queries.add(`${cityLabel} helal restoran`);
+  if (prefs.includes("Glutensiz")) queries.add(`${cityLabel} glutensiz restoran`);
+  if (prefs.includes("Deniz ürünleri")) queries.add(`${cityLabel} balık restoran`);
+}
+
+/** Grup bazlı Google arama sorguları — ulaşım modu ve yemek tercihlerine göre. */
+export function buildGroupSearchQueries(
+  cityLabel: string,
+  category: string,
+  wizard: TripWizardData,
+  variant: number
+): string[] {
+  const transport = normalizeTransport(wizard.transport);
+  const term =
+    category === "general" ? "gezilecek yerler popüler" : getCategorySearchTerm(category) ?? category;
+  const queries = new Set<string>();
+
+  if (transport === "TRANSIT") {
+    queries.add(`${cityLabel} merkez ${term}`);
+  } else {
+    queries.add(`${cityLabel} ${term}`);
+  }
+
+  const extras =
+    transport === "TRANSIT"
+      ? (TRANSIT_CATEGORY_QUERIES[category] ?? [])
+      : (CAR_CATEGORY_QUERIES[category] ?? []);
+
+  for (const extra of extras) {
+    queries.add(`${cityLabel} ${extra}`);
+  }
+
+  if (category === "food") {
+    appendFoodSearchQueries(queries, cityLabel, wizard.foodPreferences);
+  }
+
+  appendBudgetSearchQueries(queries, cityLabel, category, wizard.budget);
+
+  if (wizard.localVsTourist >= 67) {
+    if (category === "food") {
+      queries.add(`${cityLabel} meşhur turistik restoran`);
+      queries.add(`${cityLabel} en popüler restoran`);
+    } else if (["general", "historic", "museum"].includes(category)) {
+      queries.add(`${cityLabel} turistik popüler ${term}`);
+    }
+  } else if (wizard.localVsTourist <= 33) {
+    if (category === "food") {
+      queries.add(`${cityLabel} yerel sakin restoran`);
+    } else if (category === "general") {
+      queries.add(`${cityLabel} az bilinen gezilecek yer`);
+    }
+  }
+
+  if (variant > 0) {
+    queries.add(`${cityLabel} ${term} popüler`);
+    queries.add(`${cityLabel} en iyi ${term}`);
+  }
+
+  return Array.from(queries).slice(0, 6);
+}
 
 function foldTr(value: string): string {
   return value
@@ -72,23 +335,20 @@ export function scorePlace(
   place: PlaceSearchResult,
   category: string,
   wizard: TripWizardData,
-  weather?: WeatherSummary
+  weather?: WeatherSummary,
+  cityCenter?: CityCenter
 ): number {
-  let score = 50;
+  let score = 20;
 
-  if (place.rating) score += (place.rating - 3) * 15;
-  if (place.reviewCount) score += Math.min(place.reviewCount / 500, 15);
+  score += computePopularityScore(place.rating, place.reviewCount);
+  score += scoreLocalVsTouristFit(place.reviewCount, wizard.localVsTourist);
 
   if (wizard.childrenAges.length > 0 || wizard.hasBaby) {
     if (["museum", "nature", "beach"].includes(category)) score += 10;
     if (category === "cave") score += 5;
   }
 
-  if (wizard.budget === "BUDGET" && (place.priceLevel ?? 0) <= 2) score += 8;
-  if (wizard.budget === "LUXURY" && (place.priceLevel ?? 0) >= 3) score += 8;
-
-  if (wizard.localVsTourist > 70 && (place.reviewCount ?? 0) < 3000) score += 10;
-  if (wizard.localVsTourist < 30 && (place.reviewCount ?? 0) > 5000) score += 10;
+  score += scoreBudgetFit(place, wizard, category);
 
   if (weather?.isRainy) {
     if (INDOOR_CATEGORIES.has(category)) score += 20;
@@ -100,18 +360,17 @@ export function scorePlace(
     if (category === "beach") score += 10;
   }
 
-  if (wizard.pace === "RELAXED") score += place.reviewCount && place.reviewCount > 8000 ? -5 : 5;
+  if (wizard.pace === "RELAXED" && wizard.localVsTourist < 50) {
+    score += (place.reviewCount ?? 0) > 8000 ? -5 : 3;
+  }
   if (wizard.pace === "PACKED" && (place.rating ?? 0) >= 4.5) score += 5;
+  score += scorePaceDestinationFit(place, wizard);
 
   if (category === "food") {
-    const servesAlcohol = place.types.includes("bar") || place.types.includes("night_club");
-    if (wizard.foodPreferences.includes("İçkili (alkollü) mekan")) {
-      score += servesAlcohol ? 12 : -4;
-    }
-    if (wizard.foodPreferences.includes("İçkisiz (alkolsüz) mekan")) {
-      score += servesAlcohol ? -12 : 6;
-    }
+    score += scoreFoodPreferences(place, wizard.foodPreferences);
   }
+
+  score += scoreTransportFit(place, category, wizard, cityCenter);
 
   return Math.max(0, Math.min(100, score));
 }
@@ -125,41 +384,38 @@ export function buildSearchQueries(
   const dest = wizard.destination;
   const cities =
     wizard.exploreMode && routeCityNames.length > 0 ? routeCityNames : [dest];
+  const transport = normalizeTransport(wizard.transport);
 
   if (wizard.exploreMode && wizard.categories.length > 0) {
     for (const city of cities) {
       for (const catId of wizard.categories) {
-        const term = CATEGORY_SEARCH_TERMS[catId] ?? POI_CATEGORIES.find((c) => c.id === catId)?.label;
-        if (term) {
-          queries.push(`${city} ${term}`);
-        }
+        const built = buildGroupSearchQueries(city, catId, wizard, variant);
+        queries.push(...built);
       }
     }
     if (variant > 0) {
       for (const city of cities.slice(0, 2)) {
-        queries.push(`${city} gezilecek yerler`);
+        queries.push(
+          transport === "TRANSIT" ? `${city} merkez gezilecek yerler` : `${city} gezilecek yerler`
+        );
       }
     }
   } else {
-    const variantSets = [
-      [`${dest} turistik yerler`, `${dest} meşhur restoranlar`],
-      [`${dest} gezilecek yerler`, `${dest} popüler mekanlar`],
-      [`${dest} tarihi mekanlar`, `${dest} doğa gezisi`],
-      [`${dest} müze`, `${dest} yerel restoran`],
-    ];
-    queries.push(...variantSets[variant % variantSets.length]);
+    const cats = wizard.exploreMode
+      ? (["general"] as const)
+      : getPaceRecommendationConfig(wizard.pace).categories;
+
+    for (const city of cities) {
+      for (const catId of cats) {
+        queries.push(...buildGroupSearchQueries(city, catId, wizard, variant));
+      }
+    }
   }
 
   const foodCity = cities[Math.floor(cities.length / 2)] ?? dest;
-  if (wizard.foodPreferences.includes("Yerel mutfak")) {
-    queries.push(`${foodCity} yerel yemek restoran`);
-  }
-  if (wizard.foodPreferences.includes("İçkili (alkollü) mekan")) {
-    queries.push(`${foodCity} içkili restoran meyhane`);
-  }
-  if (wizard.foodPreferences.includes("İçkisiz (alkolsüz) mekan")) {
-    queries.push(`${foodCity} alkolsüz aile restoranı`);
-  }
+  const foodQueries = new Set<string>();
+  appendFoodSearchQueries(foodQueries, foodCity, wizard.foodPreferences);
+  queries.push(...Array.from(foodQueries));
 
   return queries.slice(0, 12);
 }
@@ -315,7 +571,7 @@ export function rankPlaces(
       };
     });
 
-  let ranked = recommendations.sort((a, b) => b.score - a.score);
+  let ranked = recommendations.sort(compareRecommendationRank);
 
   if (options?.searchCities && options.searchCities.length > 1) {
     const perCity = Math.max(1, Math.ceil(maxCount / options.searchCities.length));
@@ -334,8 +590,8 @@ export function rankPlaces(
       buckets[nearestIdx].push(rec);
     }
 
-    ranked = buckets.flatMap((bucket) => bucket.sort((a, b) => b.score - a.score).slice(0, perCity));
-    ranked.sort((a, b) => b.score - a.score);
+    ranked = buckets.flatMap((bucket) => bucket.sort(compareRecommendationRank).slice(0, perCity));
+    ranked.sort(compareRecommendationRank);
   }
 
   if (wizard.exploreMode && wizard.categories.length > 0) {
@@ -362,12 +618,15 @@ export function buildCategoryGroup(
     allowedCityKeys?: string[];
     limit?: number;
     cityName?: string;
+    cityCenter?: CityCenter;
   }
 ): PoiRecommendation[] {
   const exclude = new Set(options.excludePlaceIds ?? []);
   const allowedCityKeys = options.allowedCityKeys ?? [];
   const limit = options.limit ?? 3;
   const isGeneral = category === "general";
+  const cityCenter = options.cityCenter;
+  const isTransit = normalizeTransport(wizard.transport) === "TRANSIT";
 
   return places
     .filter((place) => !exclude.has(place.placeId))
@@ -376,10 +635,14 @@ export function buildCategoryGroup(
       if (isGeneral) return true;
       return classifyPlaceCategory(place, [category]) === category;
     })
+    .filter((place) => {
+      if (!isTransit) return true;
+      return isAccessibleByTransit(place, category, cityCenter);
+    })
     .map((place) => {
       const cat = isGeneral ? inferCategory(place) : category;
       const review = place.reviews?.[0];
-      const score = scorePlace(place, cat, wizard, weather);
+      const score = scorePlace(place, cat, wizard, weather, cityCenter);
 
       return {
         placeId: place.placeId,
@@ -410,7 +673,7 @@ export function buildCategoryGroup(
         weatherTag: getWeatherTagForPoi(cat, weather, options.cityName),
       };
     })
-    .sort((a, b) => b.score - a.score)
+    .sort(compareRecommendationRank)
     .slice(0, limit);
 }
 
@@ -514,6 +777,6 @@ export function filterLodging(
         ],
       };
     })
-    .sort((a, b) => b.score - a.score)
+    .sort(compareRecommendationRank)
     .slice(0, 5);
 }
