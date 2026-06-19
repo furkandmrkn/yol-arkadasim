@@ -113,12 +113,24 @@ Tarayıcı: **http://localhost:3000**
 
 ## Ücretsiz yayın (Vercel + Neon)
 
-1. **Neon** — PostgreSQL: [neon.tech](https://neon.tech) → `DATABASE_URL`
+1. **Neon** — PostgreSQL: [neon.tech](https://neon.tech) → `DATABASE_URL` (serverless için **pooled** connection string tercih edin)
 2. **GitHub** — kodu push et
 3. **Vercel** — repo import → env değişkenlerini ekle → Deploy
 4. Neon’da tablolar: `npx prisma db push` veya `prisma/migrations/` SQL dosyalarını çalıştırın
 5. Google Cloud → OAuth redirect URI: `https://YOUR_DOMAIN/api/auth/callback/google`
 6. Google Maps key referrer: `https://*.vercel.app/*`
+
+### Vercel ortam değişkenleri (giriş için zorunlu)
+
+| Değişken | Örnek |
+|----------|--------|
+| `AUTH_SECRET` | `openssl rand -base64 32` ile üretin |
+| `AUTH_URL` | `https://yol-arkadasim.vercel.app` (localhost **olmasın**) |
+| `GOOGLE_CLIENT_ID` | OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | OAuth client secret |
+| `DATABASE_URL` | Neon pooled URL |
+
+> Canlıda `Configuration` veya `Invalid code verifier` hatası: `AUTH_URL` production domain’e ayarlı mı, Google redirect URI eşleşiyor mu ve Vercel’de redeploy yaptınız mı kontrol edin.
 
 ---
 

@@ -3,6 +3,11 @@ import type { NextRequest } from "next/server";
 import { GUEST_COOKIE_NAME } from "@/lib/guest-trips";
 
 export function middleware(request: NextRequest) {
+  // OAuth PKCE çerezlerini bozmamak için auth route'larına dokunma
+  if (request.nextUrl.pathname.startsWith("/api/auth")) {
+    return NextResponse.next();
+  }
+
   const response = NextResponse.next();
 
   if (!request.cookies.get(GUEST_COOKIE_NAME)?.value) {
@@ -18,5 +23,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/auth|_next/static|_next/image|favicon.ico).*)"],
 };
