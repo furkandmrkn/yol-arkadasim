@@ -116,9 +116,28 @@ Tarayıcı: **http://localhost:3000**
 1. **Neon** — PostgreSQL: [neon.tech](https://neon.tech) → `DATABASE_URL` (serverless için **pooled** connection string tercih edin)
 2. **GitHub** — kodu push et
 3. **Vercel** — repo import → env değişkenlerini ekle → Deploy
-4. Neon’da tablolar: `npx prisma db push` veya `prisma/migrations/` SQL dosyalarını çalıştırın
+4. Neon’da tablolar — **canlı giriş için zorunlu** (aşağıdaki “Neon migration” bölümü)
 5. Google Cloud → OAuth redirect URI: `https://YOUR_DOMAIN/api/auth/callback/google`
 6. Google Maps key referrer: `https://*.vercel.app/*`
+
+### Neon migration (canlı DB)
+
+Vercel logunda `The table 'public.Account' does not exist` görürseniz Neon’da auth tabloları eksiktir.
+
+**Yöntem A — Neon SQL Editor (önerilen)**
+
+1. [Neon Console](https://console.neon.tech) → projeniz → **SQL Editor**
+2. `prisma/scripts/neon-production-migration.sql` dosyasının içeriğini yapıştırın
+3. **Run**
+
+**Yöntem B — yerelden push**
+
+```bash
+set DATABASE_URL="postgresql://...@...neon.tech/neondb?sslmode=require"
+npx prisma db push
+```
+
+Migration sonrası tarayıcı çerezlerini temizleyip Google girişini tekrar deneyin.
 
 ### Vercel ortam değişkenleri (giriş için zorunlu)
 
