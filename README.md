@@ -130,7 +130,8 @@ Tarayıcı: **http://localhost:3000**
 | `GOOGLE_CLIENT_SECRET` | OAuth client secret |
 | `DATABASE_URL` | Neon pooled URL |
 
-> Canlıda `Configuration` veya `Invalid code verifier` hatası: `AUTH_URL` production domain’e ayarlı mı, Google redirect URI eşleşiyor mu ve Vercel’de redeploy yaptınız mı kontrol edin.
+> Canlıda `Configuration` / `Invalid code verifier`: `AUTH_URL` ve Google redirect URI kontrol edin.  
+> Canlıda `Account does not exist`: Neon migration çalıştırın.
 
 ---
 
