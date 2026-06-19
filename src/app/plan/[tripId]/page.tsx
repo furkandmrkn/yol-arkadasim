@@ -13,6 +13,7 @@ import {
   Loader2,
   MapPin,
   Clock,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -143,9 +144,29 @@ export default function TripPlanPage() {
   };
 
   const cityDay = isCityDayPlan(trip.wizard);
+  const isDraft = trip.status === "DRAFT";
 
   return (
     <div className="container mx-auto px-4 py-8">
+      {isDraft && (
+        <Card className="mb-6 border-dashed border-primary/40 bg-accent/20">
+          <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">Bu plan henüz tamamlanmadı</p>
+              <p className="text-sm text-muted-foreground">
+                Öneri seçimi ve özet adımlarından kaldığınız yerden devam edebilirsiniz.
+              </p>
+            </div>
+            <Button asChild>
+              <Link href={`/plan/new?tripId=${tripId}`}>
+                <Pencil className="h-4 w-4 mr-1" />
+                Planı tamamla
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
           <Button variant="ghost" size="sm" asChild className="mb-2 -ml-2">

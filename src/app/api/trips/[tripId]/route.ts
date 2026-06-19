@@ -4,6 +4,7 @@ import { buildGoogleMapsPlaceUrl } from "@/lib/google/maps";
 import { z } from "zod";
 import { normalizeTransport } from "@/lib/scoring";
 import { getTripForModify } from "@/lib/trip-auth";
+import { buildPrismaTripDataFromWizard, tripWizardSchema } from "@/lib/trip-payload";
 import { auth } from "@/auth";
 import type { RecommendationEvidence, TripWizardData } from "@/types/trip";
 
@@ -141,6 +142,17 @@ export async function PATCH(
     if (!access.ok) return access.response;
 
     const body = await request.json();
+    const wizardParsed = tripWizardSchema.safeParse(body);
+
+    if (wizardParsed.success) {
+      const tripData = await buildPrismaTripDataFromWizard(wizardParsed.data);
+      const trip = await prisma.trip.update({
+        where: { id: params.tripId },
+        data: tripData,
+      });
+      return NextResponse.json({ id: trip.id, trip });
+    }
+
     const parsed = updateSchema.safeParse(body);
 
     if (!parsed.success) {

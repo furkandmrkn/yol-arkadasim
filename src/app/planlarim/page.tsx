@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DeleteTripButton } from "@/components/auth/DeleteTripButton";
 import { SignInPrompt } from "@/components/auth/SignInPrompt";
-import { MapPin, Plus } from "lucide-react";
+import { MapPin, Plus, Pencil } from "lucide-react";
 
 export const metadata = {
   title: "Planlarım — Yol Arkadaşım",
@@ -86,7 +86,14 @@ export default async function PlanlarimPage() {
                 <Card className="hover:border-primary/40 transition-colors">
                   <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
                     <div className="flex-1 min-w-0">
-                      <Link href={`/plan/${trip.id}`} className="block group">
+                      <Link
+                        href={
+                          trip.status === "DRAFT"
+                            ? `/plan/new?tripId=${trip.id}`
+                            : `/plan/${trip.id}`
+                        }
+                        className="block group"
+                      >
                         <p className="font-medium group-hover:text-primary transition-colors truncate">
                           {title}
                         </p>
@@ -114,6 +121,14 @@ export default async function PlanlarimPage() {
                       <Badge variant={trip.status === "PLANNED" ? "default" : "secondary"}>
                         {statusLabels[trip.status] ?? trip.status}
                       </Badge>
+                      {trip.status === "DRAFT" && (
+                        <Button asChild variant="outline" size="sm">
+                          <Link href={`/plan/new?tripId=${trip.id}`}>
+                            <Pencil className="h-4 w-4 sm:mr-1" />
+                            <span className="hidden sm:inline">Devam et</span>
+                          </Link>
+                        </Button>
+                      )}
                       <DeleteTripButton tripId={trip.id} />
                     </div>
                   </CardContent>

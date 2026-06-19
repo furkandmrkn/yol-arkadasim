@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, Loader2, Info, RefreshCw, MapPin, ChevronDown, ChevronUp, Route, Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -111,12 +111,17 @@ function poiCategoryLabel(category: string): string {
 
 export function TripWizard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const resumeTripId = searchParams.get("tripId");
+  const hasResumedRef = useRef(false);
+
   const [step, setStep] = useState(0);
   const [data, setData] = useState<TripWizardData>(defaultWizard);
   const [childAgeInput, setChildAgeInput] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
-  const [tripId, setTripId] = useState<string | null>(null);
+  const [resumeLoading, setResumeLoading] = useState(!!resumeTripId);
+  const [tripId, setTripId] = useState<string | null>(resumeTripId);
   const [recGroups, setRecGroups] = useState<RecGroupState[]>([]);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
   const [lodgingOptions, setLodgingOptions] = useState<PoiRecommendation[]>([]);
@@ -178,6 +183,194 @@ export function TripWizard() {
       window.scrollTo({ top: 0, behavior: "auto" });
     }
   }, [step]);
+
+  const buildApiPayload = useCallback(() => {
+    const wizardPayload = isCityDayPlan(data)
+      ? {
+          ...data,
+          origin: data.destination,
+          endDate: data.startDate,
+          days: 1,
+          exploreMode: true,
+          lodgingNeeded: false,
+        }
+      : data;
+
+    const parsed = tripWizardSchema.safeParse(wizardPayload);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0]?.message ?? "Form verisi geçersiz";
+      throw new Error(firstIssue);
+    }
+
+    return {
+      ...parsed.data,
+      origin:
+        parsed.data.planType === "CITY_DAY"
+          ? getLocationLabel(parsed.data.destination)
+          : getLocationLabel(parsed.data.origin),
+      destination: getLocationLabel(parsed.data.destination),
+      ...(parsed.data.planType === "CITY_DAY"
+        ? {
+            endDate: parsed.data.startDate,
+            days: 1,
+            exploreMode: true,
+            lodgingNeeded: false,
+          }
+        : {}),
+    };
+  }, [data]);
+
+  const fetchGroupedRecommendations = useCallback(
+    async (id: string, wizardOverride?: TripWizardData) => {
+      const w = wizardOverride ?? data;
+      const categories = resolveRecommendationCategories(w);
+      const cityIds =
+        w.recommendationScope === "SELECTED_CITIES" && w.selectedRouteCities.length > 0
+          ? w.selectedRouteCities
+          : w.destination
+            ? [w.destination]
+            : [];
+      const perGroup = getRecommendationPerGroupLimit(w, DEFAULT_POI_PER_GROUP);
+      const maxPages = getRecommendationMaxPages(w, DEFAULT_POI_MAX_PAGES);
+
+      const res = await fetch("/api/recommendations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tripId: id,
+          mode: "grouped",
+          categories,
+          cities: cityIds,
+          limit: perGroup,
+          variant: 0,
+        }),
+      });
+      if (!res.ok) throw new Error("Öneriler alınamadı");
+      const result = await res.json();
+      const groups = (result.groups ?? []) as {
+        category: string;
+        cityId: string;
+        cityLabel: string;
+        items: PoiRecommendation[];
+      }[];
+      const perGroupResult = (result.perGroupLimit as number | undefined) ?? perGroup;
+      const maxPagesResult = (result.maxPages as number | undefined) ?? maxPages;
+      setRecMeta({ perGroup: perGroupResult, maxPages: maxPagesResult });
+
+      const groupStates: RecGroupState[] = groups.map((g) => ({
+        key: `${g.category}__${g.cityId}`,
+        category: g.category,
+        categoryLabel: poiCategoryLabel(g.category),
+        cityId: g.cityId,
+        cityLabel: g.cityLabel,
+        pages: [g.items],
+        page: 1,
+        loading: false,
+        exhausted: g.items.length < perGroupResult,
+      }));
+
+      setRecGroups(groupStates);
+      setSelectedStops(new Set());
+      setCollapsedCategories(new Set());
+    },
+    [data]
+  );
+
+  const fetchLodgingWithWizard = useCallback(
+    async (
+      id: string,
+      options?: { excludePlaceIds?: string[]; queryVariant?: number; wizardOverride?: TripWizardData }
+    ) => {
+      const w = options?.wizardOverride ?? data;
+      const res = await fetch("/api/recommendations/lodging", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tripId: id,
+          excludePlaceIds: options?.excludePlaceIds ?? [],
+          queryVariant: options?.queryVariant ?? 0,
+          lodgingAmenities: w.lodgingAmenities,
+          lodgingScope: w.lodgingScope,
+          selectedLodgingCities:
+            w.lodgingScope === "SELECTED_CITIES" ? w.selectedLodgingCities : [],
+        }),
+      });
+      if (!res.ok) throw new Error("Konaklama önerileri alınamadı");
+      const result = await res.json();
+      const lodging = (result.lodging ?? []) as PoiRecommendation[];
+      setLodgingSearchCity(result.lodgingSearchCity ?? null);
+      if (lodging.length === 0 && (options?.excludePlaceIds?.length ?? 0) > 0) {
+        throw new Error("Başka konaklama bulunamadı. Filtreleri değiştirmeyi deneyin.");
+      }
+      setLodgingOptions(lodging);
+      setSelectedLodging((current) => {
+        if (current && lodging.some((item) => item.placeId === current)) {
+          return current;
+        }
+        return lodging[0]?.placeId ?? null;
+      });
+    },
+    [data]
+  );
+
+  useEffect(() => {
+    if (!resumeTripId || hasResumedRef.current) return;
+    hasResumedRef.current = true;
+
+    (async () => {
+      setResumeLoading(true);
+      try {
+        const res = await fetch(`/api/trips/${resumeTripId}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? "Plan yüklenemedi");
+        }
+        const trip = (await res.json()) as {
+          id: string;
+          status: string;
+          wizard: TripWizardData;
+          stops: PoiRecommendation[];
+        };
+
+        if (trip.status === "PLANNED" || trip.status === "COMPLETED") {
+          router.replace(`/plan/${trip.id}`);
+          return;
+        }
+
+        const wizard = trip.wizard;
+        setData(wizard);
+        setTripId(trip.id);
+
+        const poiStops = trip.stops.filter((s) => s.stopType !== "LODGING");
+        const lodgingStop = trip.stops.find((s) => s.stopType === "LODGING");
+
+        if (poiStops.length > 0) {
+          setSelectedStops(new Set(poiStops.map((s) => s.placeId)));
+          if (lodgingStop) setSelectedLodging(lodgingStop.placeId);
+          setStep(4);
+          if (wizard.lodgingNeeded && wizard.planType !== "CITY_DAY") {
+            await fetchLodgingWithWizard(trip.id, { wizardOverride: wizard });
+          }
+          return;
+        }
+
+        setStep(3);
+        setSearchOverlay({
+          title: "Öneriler yükleniyor",
+          lines: buildRecommendationSummary(wizard),
+        });
+        await fetchGroupedRecommendations(trip.id, wizard);
+        setSearchOverlay(null);
+      } catch (e) {
+        setErrors({
+          general: e instanceof Error ? e.message : "Taslak plan yüklenemedi",
+        });
+      } finally {
+        setResumeLoading(false);
+        setSearchOverlay(null);
+      }
+    })();
+  }, [resumeTripId, router, fetchGroupedRecommendations, fetchLodgingWithWizard]);
 
   const routeCityOptions = useMemo(() => {
     if (!data.origin || !data.destination) {
@@ -271,40 +464,7 @@ export function TripWizard() {
   };
 
   const createTrip = async () => {
-    const wizardPayload = isCityDay
-      ? {
-          ...data,
-          origin: data.destination,
-          endDate: data.startDate,
-          days: 1,
-          exploreMode: true,
-          lodgingNeeded: false,
-        }
-      : data;
-
-    const parsed = tripWizardSchema.safeParse(wizardPayload);
-    if (!parsed.success) {
-      const firstIssue = parsed.error.issues[0]?.message ?? "Form verisi geçersiz";
-      throw new Error(firstIssue);
-    }
-
-    const payload = {
-      ...parsed.data,
-      origin:
-        parsed.data.planType === "CITY_DAY"
-          ? getLocationLabel(parsed.data.destination)
-          : getLocationLabel(parsed.data.origin),
-      destination: getLocationLabel(parsed.data.destination),
-      ...(parsed.data.planType === "CITY_DAY"
-        ? {
-            endDate: parsed.data.startDate,
-            days: 1,
-            exploreMode: true,
-            lodgingNeeded: false,
-          }
-        : {}),
-    };
-
+    const payload = buildApiPayload();
     const res = await fetch("/api/trips", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -328,46 +488,18 @@ export function TripWizard() {
     return trip.id as string;
   };
 
-  const fetchGroupedRecommendations = async (id: string) => {
-    const res = await fetch("/api/recommendations", {
-      method: "POST",
+  const updateTripWizard = async (id: string) => {
+    const payload = buildApiPayload();
+    const res = await fetch(`/api/trips/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tripId: id,
-        mode: "grouped",
-        categories: selectedPoiCategories,
-        cities: selectedPoiCityIds,
-        limit: poiPerGroup,
-        variant: 0,
-      }),
+      body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error("Öneriler alınamadı");
-    const result = await res.json();
-    const groups = (result.groups ?? []) as {
-      category: string;
-      cityId: string;
-      cityLabel: string;
-      items: PoiRecommendation[];
-    }[];
-    const perGroup = (result.perGroupLimit as number | undefined) ?? poiPerGroup;
-    const maxPages = (result.maxPages as number | undefined) ?? poiMaxPages;
-    setRecMeta({ perGroup, maxPages });
-
-    const groupStates: RecGroupState[] = groups.map((g) => ({
-      key: `${g.category}__${g.cityId}`,
-      category: g.category,
-      categoryLabel: poiCategoryLabel(g.category),
-      cityId: g.cityId,
-      cityLabel: g.cityLabel,
-      pages: [g.items],
-      page: 1,
-      loading: false,
-      exhausted: g.items.length < perGroup,
-    }));
-
-    setRecGroups(groupStates);
-    setSelectedStops(new Set());
-    setCollapsedCategories(new Set());
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body.error ?? "Plan güncellenemedi");
+    }
+    return id;
   };
 
   const loadGroupPage = async (groupKey: string, targetPage: number) => {
@@ -445,35 +577,7 @@ export function TripWizard() {
   const fetchLodging = async (
     id: string,
     options?: { excludePlaceIds?: string[]; queryVariant?: number }
-  ) => {
-    const res = await fetch("/api/recommendations/lodging", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tripId: id,
-        excludePlaceIds: options?.excludePlaceIds ?? [],
-        queryVariant: options?.queryVariant ?? 0,
-        lodgingAmenities: data.lodgingAmenities,
-        lodgingScope: data.lodgingScope,
-        selectedLodgingCities:
-          data.lodgingScope === "SELECTED_CITIES" ? data.selectedLodgingCities : [],
-      }),
-    });
-    if (!res.ok) throw new Error("Konaklama önerileri alınamadı");
-    const result = await res.json();
-    const lodging = (result.lodging ?? []) as PoiRecommendation[];
-    setLodgingSearchCity(result.lodgingSearchCity ?? null);
-    if (lodging.length === 0 && (options?.excludePlaceIds?.length ?? 0) > 0) {
-      throw new Error("Başka konaklama bulunamadı. Filtreleri değiştirmeyi deneyin.");
-    }
-    setLodgingOptions(lodging);
-    setSelectedLodging((current) => {
-      if (current && lodging.some((item) => item.placeId === current)) {
-        return current;
-      }
-      return lodging[0]?.placeId ?? null;
-    });
-  };
+  ) => fetchLodgingWithWizard(id, options);
 
   const syncLodgingPrefs = useCallback(
     async (id: string) => {
@@ -628,15 +732,16 @@ export function TripWizard() {
       if (step === 2) {
         let id = tripId;
         if (!id) id = await createTrip();
+        else await updateTripWizard(id);
         if (!id) {
           throw new Error("Plan kaydı oluşturulamadı. Lütfen tekrar deneyin.");
         }
         setSearchOverlay({
-            title: "Öneriler aranıyor",
-            lines: buildRecommendationSummary(data),
-          });
-          await fetchGroupedRecommendations(id);
-          setSearchOverlay(null);
+          title: "Öneriler aranıyor",
+          lines: buildRecommendationSummary(data),
+        });
+        await fetchGroupedRecommendations(id);
+        setSearchOverlay(null);
         setStep(3);
       } else if (step === 3) {
         setStep(4);
@@ -732,11 +837,24 @@ export function TripWizard() {
     setChildAgeInput("");
   };
 
+  if (resumeLoading) {
+    return (
+      <div className="container mx-auto px-4 py-16 flex flex-col items-center gap-3">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Taslak planınız yükleniyor...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
       <div className="mb-8">
         <h1 className="text-2xl font-bold mb-2">
-          {isCityDay ? "Şehirde Gez" : "Yeni Seyahat Planı"}
+          {resumeTripId
+            ? "Planı tamamla"
+            : isCityDay
+              ? "Şehirde Gez"
+              : "Yeni Seyahat Planı"}
         </h1>
         <p className="text-muted-foreground text-sm mb-4">
           Adım {step + 1}/{steps.length}: {steps[step]}
